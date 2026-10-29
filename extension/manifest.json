@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "OpenFront Spawn Heatmaps",
+  "version": "0.2.1",
+  "description": "Overlays ofstats.io spawn heatmaps on OpenFront lobbies/games.",
+  "content_scripts": [
+    {
+      "matches": ["*://openfront.io/*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"]
+    }
+  ]
+}
