@@ -231,4 +231,57 @@
   observer.observe(document.body, { childList: true, subtree: true });
 
   checkMap();
+
+  // --- Phase 2: live best-spawn suggestion (verification step) -----------
+  // Listens for the state inject.js (MAIN world) posts, joins tile ownerID
+  // -> player registry via smallID, and logs the result. Scoring/overlay
+  // comes after this is confirmed against a real lobby — see PHASE2.md.
+  let latestTileState = null; // {width, height, ownerIds: Uint16Array}
+  let latestPicks = null; // [{x, y, radius, kind, r, g, b}]
+  const playersByID = new Map(); // smallID -> {playerType, name, nationFlag, clientID}
+
+  function playerFor(ownerId) {
+    if (ownerId === 0) return null; // 0 = unowned
+    return playersByID.get(ownerId) || null;
+  }
+
+  function logJoinedState() {
+    if (!latestTileState) return;
+    const counts = { HUMAN: 0, NATION: 0, BOT: 0, unowned: 0, unknown: 0 };
+    for (const ownerId of latestTileState.ownerIds) {
+      if (ownerId === 0) {
+        counts.unowned++;
+        continue;
+      }
+      const player = playerFor(ownerId);
+      if (!player) counts.unknown++;
+      else counts[player.playerType] = (counts[player.playerType] || 0) + 1;
+    }
+    console.log("[oftools-phase2] tile ownership by player type", counts);
+    console.log(
+      "[oftools-phase2] players",
+      Array.from(playersByID.values()),
+    );
+    if (latestPicks) {
+      // picks carry kind (0=enemy/1=self/2=teammate) + color, not a smallID
+      // — no player join possible here, per PHASE2.md.
+      console.log("[oftools-phase2] pending spawn picks", latestPicks);
+    }
+  }
+
+  window.addEventListener("message", (ev) => {
+    const d = ev.data;
+    if (ev.source !== window || !d || d.source !== "oftools-inject") return;
+
+    if (d.type === "oftools-players") {
+      for (const p of d.players) playersByID.set(p.smallID, p);
+      logJoinedState();
+    } else if (d.type === "oftools-tilestate") {
+      latestTileState = { width: d.width, height: d.height, ownerIds: d.ownerIds };
+      logJoinedState();
+    } else if (d.type === "oftools-spawns") {
+      latestPicks = d.picks;
+      logJoinedState();
+    }
+  });
 })();

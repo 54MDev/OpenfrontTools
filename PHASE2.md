@@ -180,14 +180,12 @@ approach above rather than forcing it.
   spawn scoring.
 - No settings UI for scoring weights until the simple version is proven wrong.
 
-## Status: investigation complete, ready to build
+## Status: build steps 1-3 done and live-verified, step 4 (scoring + overlay) next
 
-Every checklist item above is resolved and confirmed against a real live session
-(private 2-human lobby, World map). Nothing left to investigate — the next session
-should go straight to implementation, not more verification. See the verified
-reference code below; it's already proven to work against the real game, just
-needs restructuring from "dump to `window.__oftools` for manual console
-inspection" into "post via `window.postMessage` for `content.js` to consume."
+Every checklist item below is resolved and confirmed against real live sessions
+(private 2-human lobby and a public lobby, World map). `inject.js` and the
+`content.js` listener are built and confirmed working end-to-end against a real
+game — see the build-order section below for what's verified and what's left.
 
 ## Appendix: verified reference hooks
 
@@ -306,11 +304,39 @@ active ~20 seconds before the game's first relevant GL/Worker activity, no race.
 
 ## Suggested build order for the next session
 
-1. Write `inject.js` from the appendix above, cleaned up to actually decode (not
-   just log) and `window.postMessage` the three pieces of state to `content.js`.
-2. Add a second `content_scripts` entry to `manifest.json` for `inject.js` with
-   `"world": "MAIN"` (same `matches` as the existing one).
-3. Wire `content.js` to listen for the posted messages, join tile `ownerID` →
-   player registry via `smallID`, and `console.log` the joined result first —
-   verify against a real lobby before building the scoring/UI on top.
-4. Only then: scoring function + overlay marker for the suggested spawn tile.
+1. [x] Write `inject.js` from the appendix above, cleaned up to actually decode
+   (not just log) and `window.postMessage` the three pieces of state to
+   `content.js`. Decode steps (`decodeOwnerIds`, `decodePicks`,
+   `decodePlayers`) pulled out as pure functions with a Node `assert`
+   self-check (`extension/test_inject.js`, run via `node test_inject.js`) —
+   no browser needed to catch a stride/mask typo.
+2. [x] Add a second `content_scripts` entry to `manifest.json` for `inject.js`
+   with `"world": "MAIN"`, `run_at: "document_start"` (same `matches` as the
+   existing one).
+3. [x] Wire `content.js` to listen for the posted messages, join tile
+   `ownerID` → player registry via `smallID`, and `console.log` the joined
+   result — **verified live** against a real public lobby (2026-10-30):
+   - Player registry decoded correctly: 70 `HUMAN` entries (real
+     names/clientIDs), 22 `NATION` entries (real city names + flags), ~400
+     `BOT` entries (tribes). This also resolves the one checklist item that
+     was previously unconfirmed — tribes do arrive with `playerType: "BOT"`,
+     not a separate/missing schema.
+   - Tile-ownership join confirmed: during pre-spawn,
+     `{HUMAN: 0, NATION: 1071, BOT: 20762, unowned: 5478167, unknown: 0}` —
+     `unknown: 0` means every owned tile's `ownerID` successfully joined to a
+     known `smallID`, no drift between the two channels.
+   - Pending spawn picks confirmed live and growing as other humans picked
+     spawns during the countdown: `[{…}]` → `(2) [{…}, {…}]`.
+   - One bug caught and fixed before this run: the pick's `kind` field
+     (0/1/2 = enemy/self/teammate) was mistakenly used as a `smallID` lookup
+     in an early draft of the logging code — removed; picks carry no
+     `smallID`, no player join is possible on them.
+4. [ ] Scoring function + overlay marker for the suggested spawn tile. Not
+   started yet — next up.
+
+Verification method note: a Playwright-automated browser was tried first to
+drive this check unattended, but openfront.io's Cloudflare Turnstile rejects
+automated browsers outright (`Turnstile failed: 600010`) — so this can't be
+scripted end-to-end. The working approach: the user plays a real lobby in
+their own browser with the unpacked extension loaded, exports the DevTools
+console log, and hands the file over for review.
