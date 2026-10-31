@@ -1,7 +1,7 @@
 // Plain-node assert self-check for inject.js's pure decode logic — no
 // framework, run with `node extension/test_inject.js`.
 const assert = require("assert");
-const { decodeOwnerIds, decodePicks, decodePlayers } = require("./inject.js");
+const { decodeOwnerIds, decodePicks, decodeTerrain, decodePlayers } = require("./inject.js");
 
 // ownerID = low 12 bits; fallout (bit 13) / defense (bit 14) must be dropped.
 {
@@ -23,6 +23,17 @@ const { decodeOwnerIds, decodePicks, decodePlayers } = require("./inject.js");
   });
   assert.strictEqual(picks[1].kind, 1);
   assert.throws(() => decodePicks(new Float32Array([1, 2, 3])));
+}
+
+// Terrain: bit 7 = land, magnitude 31 (bits 0-4) = impassable even if land.
+{
+  const bytes = new Uint8Array([
+    0x00, // water, magnitude 0
+    0x80, // land, magnitude 0
+    0x9f, // land, magnitude 31 -> impassable, excluded
+    0x1f, // water, magnitude 31 -> still water
+  ]);
+  assert.deepStrictEqual(Array.from(decodeTerrain(bytes)), [0, 1, 0, 0]);
 }
 
 // Player registry: only GameUpdateType.Player (key "2") entries, across ticks.

@@ -1,0 +1,28 @@
+# OpenFront Tools — orientation for future sessions
+
+A browser extension (`extension/`) for [openfront.io](https://openfront.io): an ofstats.io spawn-heatmap overlay, plus a live "best spawn tile" suggestion (red dot marker) during the spawn-pick countdown.
+
+Read `README.md` for what it does as a user. Read `PHASE2.md` then `STEP4.md` for the full history of *why* it's built this way — both are investigation logs, not just plans, and contain hard-won reverse-engineering detail (exact WebGL hook points, byte layouts, coordinate formulas) that would otherwise need rediscovering. **Read STEP4.md's final "Status" section first** — it's a dense summary of the whole thing and the mistakes already made and fixed, so you don't repeat them.
+
+## File map
+
+- `inject.js` — runs in the page's own JS world (`world: "MAIN"`, before OpenFront's bundle loads). Patches `WebGL2RenderingContext.prototype` methods and `window.fetch`/`window.Worker` to intercept ground-truth game state as it crosses standard browser APIs, decodes it, `postMessage`s it to `content.js`. Decode functions are pulled out as pure functions so `test_inject.js` can run them under plain Node.
+- `content.js` — isolated-world content script. Listens for `inject.js`'s posted state, draws the heatmap panel, runs the scoring, draws the best-spawn marker.
+- `scoring.js` — pure scoring logic (`bestSpawnTile`, `bestSpawnTileFromHeatmap`), no DOM/WebGL, loaded as a plain content-script global before `content.js` (see `manifest.json`'s `js` array order — this is how it gets access without a bundler).
+- `test_inject.js`, `test_scoring.js` — plain Node `assert` self-checks, no framework. Run with `node extension/test_inject.js` / `node extension/test_scoring.js`. **Run both after any change to `inject.js` or `scoring.js`.**
+- `manifest.json` — bump `version` on every change that ships (see convention below).
+
+## Hard-won facts (don't re-derive these)
+
+- **Four live signals, four hooks**: tile ownership (`texImage2D`/`texSubImage2D` on an `R16UI` texture, `ownerID` = low 12 bits), pending spawn picks (`bufferSubData`, flat `[x,y,radius,kind,r,g,b]` floats), terrain/land-vs-water (`window.fetch` on `map.bin`-family URLs, bit 7 of each byte = land, magnitude 31 = impassable), camera transform (`uniformMatrix3fv`, a 3x3 matrix picked out by its shape — see STEP4.md 4.2 for the exact screen-projection formula). Player registry (human/nation/tribe + `smallID`) comes via `window.Worker` message interception, not a GL hook.
+- **The `map.bin` fetch loads before game textures exist** — `inject.js` can't disambiguate which `.bin` fetch is the real terrain by matching tile-texture size (it doesn't know it yet). `content.js` does that matching instead, once both are available, and must take the *most recent* matching candidate, not the first — the lobby's map-select carousel fetches a `.bin` per map thumbnail, not just the chosen one, and many maps share tile-grid dimensions by coincidence.
+- **"Maximize distance from X" always walks to a map edge/corner or the single most isolated reachable point** — this is the actual math, not a bug, and it bit this project three separate times (unbounded search → map corner; radius bound scaled by pick spread → still reached the edge because spread-out players are normal; even correctly bounded → still found the single most isolated point inside the bound, i.e. "ran to islands"). The fix that actually worked: target a *moderate* distance (half the search radius) from the nearest pick, not the maximum. If you ever add another "stay away from X" heuristic, start from "target a moderate value," don't start from "maximize."
+- **Full-grid brute-force distance scans are too slow at real map scale** (millions of tiles) — measured as visible main-thread lag live, not a theoretical risk. `bestSpawnTile` takes a `step` parameter (sample every Nth tile) specifically because of this; `content.js` computes `step` to cap the scan at ~10k candidate tiles regardless of map size.
+- **Primary spawn-scorer is the ofstats.io heatmap data** (`bestSpawnTileFromHeatmap`), not the live distance heuristic — the live distance-based `bestSpawnTile` is only a *fallback* for maps with too little recorded history. The heatmap approach sidesteps the whole edge-bias problem by construction (strong historical cells are in played areas, not corners), which is why it's primary.
+- **DevTools' plain-text console copy collapses nested objects to the literal string `Object`** — if you need a user to paste back console output for debugging, log with `JSON.stringify(...)`, not a bare object, or you'll get useless placeholder text back.
+
+## Conventions
+
+- Bump `extension/manifest.json`'s `version` on every shipped change (patch bump for fixes/tuning, minor bump for an actual approach change — e.g. 0.2.x → 0.3.0 happened when the primary scorer switched from pure distance-math to the heatmap). This is the only versioning in the repo; there's no separate changelog file, commit messages (`git log`) and this version number are the history.
+- Every non-trivial pure-logic change gets a `node extension/test_*.js` run before considering it done — this project's testing culture, established in `PHASE2.md`/`BUILD_PLAN.md`, is "verify live, don't stack unverified steps," and the Node self-checks are the fast/cheap half of that (the slow half is an actual lobby).
+- STEP4.md is a running investigation log, not a static plan — when you find something that contradicts an earlier assumption (a wrong conclusion, a bug, a live measurement), add to it with a timestamp and explain *why* the earlier version was wrong, don't just silently fix and move on. Future sessions (including future you) rely on that trail.

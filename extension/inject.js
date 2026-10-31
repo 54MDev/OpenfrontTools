@@ -32,6 +32,17 @@ function decodePicks(f) {
   return picks;
 }
 
+function decodeTerrain(bytes) {
+  // bytes: Uint8Array from map.bin-family fetch, row-major, one byte/tile.
+  // bit 7 = IS_LAND_BIT, bits 0-4 = MAGNITUDE_MASK, 31 = impassable (GameMapImpl.ts).
+  const isLand = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    isLand[i] = b & 0x80 && (b & 0x1f) !== 31 ? 1 : 0;
+  }
+  return isLand;
+}
+
 function decodePlayers(gameUpdates) {
   const players = [];
   for (const tick of gameUpdates) {
@@ -134,7 +145,60 @@ if (typeof window !== "undefined") {
       return origBufferSubData.apply(this, args);
     };
 
-    // --- 3. Player registry (human/nation/tribe + smallID) -----------------
+    // --- 3. Terrain (land/water) -------------------------------------------
+    // map.bin-family: plain fetch, one byte/tile, row-major, no header. Loads
+    // *before* game textures exist, so tileTexSize isn't known yet at fetch
+    // time — can't disambiguate here. Decode every matching .bin unconditio-
+    // nally and let content.js (which holds tile state) match by length once
+    // both are available; a map may fetch more than one variant
+    // (map.bin/map4x.bin/map16x.bin).
+    const origFetch = window.fetch;
+    window.fetch = async function (...args) {
+      const response = await origFetch.apply(this, args);
+      try {
+        const url = typeof args[0] === "string" ? args[0] : args[0]?.url;
+        if (url && url.includes("/maps/") && /\.bin(\?|$)/.test(url)) {
+          response
+            .clone()
+            .arrayBuffer()
+            .then((buf) => {
+              post("oftools-terrain", {
+                isLand: decodeTerrain(new Uint8Array(buf)),
+              });
+            })
+            .catch(() => {});
+        }
+      } catch (e) {}
+      return response;
+    };
+
+    // --- 4. Camera transform ------------------------------------------------
+    // World->clip 3x3 matrix, column-major [sx,0,0, 0,sy,0, tx,ty,1], uploaded
+    // once/frame via uniformMatrix3fv. Picked out of all such calls by shape
+    // (zeros/1 in the fixed slots, sx>0, sy<0 since Y flips) — confirmed live
+    // against a real lobby, see STEP4.md 4.2.
+    const origUniformMatrix3fv = GL.uniformMatrix3fv;
+    GL.uniformMatrix3fv = function (location, transpose, data, ...rest) {
+      try {
+        const m = data;
+        if (
+          m &&
+          m.length >= 9 &&
+          m[1] === 0 &&
+          m[2] === 0 &&
+          m[3] === 0 &&
+          m[5] === 0 &&
+          m[8] === 1 &&
+          m[0] > 0 &&
+          m[4] < 0
+        ) {
+          post("oftools-camera", { sx: m[0], sy: m[4], tx: m[6], ty: m[7] });
+        }
+      } catch (e) {}
+      return origUniformMatrix3fv.apply(this, [location, transpose, data, ...rest]);
+    };
+
+    // --- 5. Player registry (human/nation/tribe + smallID) -----------------
     const OrigWorker = window.Worker;
     function PatchedWorker(...args) {
       const w = new OrigWorker(...args);
@@ -154,5 +218,5 @@ if (typeof window !== "undefined") {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { decodeOwnerIds, decodePicks, decodePlayers };
+  module.exports = { decodeOwnerIds, decodePicks, decodeTerrain, decodePlayers };
 }

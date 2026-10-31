@@ -6,6 +6,7 @@
 
   let currentMapName = null;
   const heatmapCache = new Map(); // mapName -> parsed response
+  let latestHeatmapData = null; // the active map's heatmap, for step4 scoring below
 
   // offsetParent is null when the element (or an ancestor) is display:none —
   // OpenFront keeps every "page" mounted in the DOM at all times and just
@@ -205,6 +206,7 @@
     try {
       const data = await fetchHeatmap(mapName);
       root._setLastData(data);
+      latestHeatmapData = data;
       drawHeatmap(canvas, data);
       status.textContent = data.cells.length
         ? `${data.totalGames} games, ${data.totalSpawns} spawns`
@@ -237,12 +239,41 @@
   // -> player registry via smallID, and logs the result. Scoring/overlay
   // comes after this is confirmed against a real lobby — see PHASE2.md.
   let latestTileState = null; // {width, height, ownerIds: Uint16Array}
+  let latestTerrain = null; // {width, height, isLand: Uint8Array}
+  let terrainCandidates = []; // [Uint8Array] — map.bin fetches not yet matched to tile dims
   let latestPicks = null; // [{x, y, radius, kind, r, g, b}]
+  let latestCamera = null; // {sx, sy, tx, ty}
+  let lastBestTile = null; // {x, y} | null — drawn by the marker loop below
   const playersByID = new Map(); // smallID -> {playerType, name, nationFlag, clientID}
 
   function playerFor(ownerId) {
     if (ownerId === 0) return null; // 0 = unowned
     return playersByID.get(ownerId) || null;
+  }
+
+  // inject.js can't tell which .bin fetch is the real terrain (it loads
+  // before game textures exist, so tileTexSize isn't known yet there) — so
+  // it posts every match and we pick one here. The lobby's map-select
+  // carousel fetches a .bin per map shown as a thumbnail, not just the one
+  // picked, and many maps share the same tile-grid dimensions — so byte
+  // length alone can match the wrong map. Always take the MOST RECENT
+  // matching candidate, not the first: the real in-game fetch happens last,
+  // after the lobby's own prefetching is done, so newest-match-wins self-
+  // corrects once the real one arrives, even if an earlier mismatch already
+  // resolved something.
+  function resolveTerrain() {
+    if (!latestTileState) return;
+    const expected = latestTileState.width * latestTileState.height;
+    for (let i = terrainCandidates.length - 1; i >= 0; i--) {
+      if (terrainCandidates[i].length === expected) {
+        latestTerrain = {
+          width: latestTileState.width,
+          height: latestTileState.height,
+          isLand: terrainCandidates[i],
+        };
+        return;
+      }
+    }
   }
 
   function logJoinedState() {
@@ -267,7 +298,125 @@
       // — no player join possible here, per PHASE2.md.
       console.log("[oftools-phase2] pending spawn picks", latestPicks);
     }
+    if (latestTerrain) {
+      let land = 0;
+      for (const v of latestTerrain.isLand) if (v) land++;
+      console.log("[oftools-phase2] terrain", {
+        land,
+        water: latestTerrain.isLand.length - land,
+      });
+
+      // Prefer the ofstats.io heatmap (real historical win-rate per cell) —
+      // naturally avoids edges/corners since good spawns cluster in played
+      // areas, not an assumption we have to encode ourselves. Falls back to
+      // the live distance-based scan (below) only when there's no heatmap
+      // yet, or nothing meets its own sample-size floor.
+      const fromHeatmap = bestSpawnTileFromHeatmap(
+        latestTileState.ownerIds,
+        latestTerrain.isLand,
+        latestTileState.width,
+        latestTileState.height,
+        latestPicks || [],
+        latestHeatmapData,
+      );
+
+      // Cap the scan at roughly 10k candidate tiles regardless of map size
+      // — brute force over every tile was measured too slow live (visible
+      // main-thread lag during real play), see scoring.js's own note.
+      const step = Math.max(
+        1,
+        Math.round(Math.sqrt((latestTileState.width * latestTileState.height) / 10000)),
+      );
+      const best =
+        fromHeatmap ||
+        bestSpawnTile(
+          latestTileState.ownerIds,
+          latestTerrain.isLand,
+          latestTileState.width,
+          latestTileState.height,
+          playersByID,
+          latestPicks || [],
+          step,
+        );
+      console.log(
+        "[oftools-step4] best spawn tile",
+        JSON.stringify(best),
+        fromHeatmap ? "(from heatmap)" : "(distance fallback)",
+        "map:",
+        latestTileState.width,
+        "x",
+        latestTileState.height,
+        "picks:",
+        JSON.stringify((latestPicks || []).map((p) => [Math.round(p.x), Math.round(p.y)])),
+      );
+      lastBestTile = best;
+    }
   }
+
+  // --- Step 4 marker (quick visual check, ahead of 4.8's real version) ---
+  // ponytail: no phase-stop yet (runs the whole page lifetime, not just
+  // during spawn pick) — fine for eyeballing the suggestion live; add the
+  // stop-on-game-start condition in 4.8 proper.
+  function getGameCanvas() {
+    for (const c of document.querySelectorAll("canvas")) {
+      if (!c.id.startsWith("oftools-")) return c;
+    }
+    return null;
+  }
+
+  let markerCanvas = null;
+  function getMarkerCanvas() {
+    if (markerCanvas) return markerCanvas;
+    markerCanvas = document.createElement("canvas");
+    markerCanvas.id = "oftools-marker-canvas";
+    markerCanvas.style.position = "fixed";
+    markerCanvas.style.pointerEvents = "none";
+    markerCanvas.style.zIndex = "9999";
+    document.body.appendChild(markerCanvas);
+    return markerCanvas;
+  }
+
+  // Formula confirmed live in STEP4.md's 4.2 against a real lobby.
+  function worldToScreen(worldX, worldY, cam, canvasW, canvasH, dpr) {
+    const zoom = (cam.sx * canvasW) / 2;
+    const offsetX = -cam.tx / cam.sx;
+    const offsetY = -cam.ty / cam.sy;
+    return {
+      x: (zoom * (worldX - offsetX)) / dpr + canvasW / (2 * dpr),
+      y: (zoom * (worldY - offsetY)) / dpr + canvasH / (2 * dpr),
+    };
+  }
+
+  function drawMarkerLoop() {
+    requestAnimationFrame(drawMarkerLoop);
+    const gameCanvas = getGameCanvas();
+    if (!gameCanvas || !latestCamera || !lastBestTile) return;
+
+    const rect = gameCanvas.getBoundingClientRect();
+    const canvas = getMarkerCanvas();
+    canvas.style.left = `${rect.left}px`;
+    canvas.style.top = `${rect.top}px`;
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+
+    const dpr = window.devicePixelRatio || 1;
+    const pos = worldToScreen(
+      lastBestTile.x,
+      lastBestTile.y,
+      latestCamera,
+      gameCanvas.width,
+      gameCanvas.height,
+      dpr,
+    );
+
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "red";
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  requestAnimationFrame(drawMarkerLoop);
 
   window.addEventListener("message", (ev) => {
     const d = ev.data;
@@ -278,10 +427,18 @@
       logJoinedState();
     } else if (d.type === "oftools-tilestate") {
       latestTileState = { width: d.width, height: d.height, ownerIds: d.ownerIds };
+      resolveTerrain();
       logJoinedState();
     } else if (d.type === "oftools-spawns") {
       latestPicks = d.picks;
       logJoinedState();
+    } else if (d.type === "oftools-terrain") {
+      terrainCandidates.push(d.isLand);
+      if (terrainCandidates.length > 10) terrainCandidates.shift();
+      resolveTerrain();
+      logJoinedState();
+    } else if (d.type === "oftools-camera") {
+      latestCamera = { sx: d.sx, sy: d.sy, tx: d.tx, ty: d.ty };
     }
   });
 })();

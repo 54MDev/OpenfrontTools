@@ -1,10 +1,41 @@
 # OpenFront Spawn Heatmap Overlay
 
-A Chrome extension that overlays [ofstats.io](https://ofstats.io) spawn heatmaps directly onto [openfront.io](https://openfront.io), so you can see the best (and worst) spots to spawn without leaving the game.
+A Chrome extension that overlays [ofstats.io](https://ofstats.io) spawn heatmaps directly onto [openfront.io](https://openfront.io), so you can see the best (and worst) spots to spawn without leaving the game — and, during the spawn-pick countdown, marks the single best tile for you.
+
+## Heatmap panel
 
 - Blue = worse than expected win rate, red = better, white = as expected.
 - Updates automatically as you pick a map (hosting) or join someone's lobby.
 - Draggable, resizable, collapsible.
+
+## Best-spawn marker
+
+During the spawn-pick phase, a **red dot** appears on the map at the tile the extension thinks is your best spawn right now. It updates live as other players move their picks.
+
+- When the current map has enough recorded history on ofstats.io, the suggestion comes straight from that heatmap — it looks for the strongest-performing area with enough games behind it to trust, then the best open tile inside it.
+- On a map with little or no history yet, it falls back to a live calculation: a tile a moderate distance from other players' pending picks (close enough to be in the action, far enough not to crowd anyone) and away from nation/tribe territory.
+- It only ever suggests unowned, land tiles — never water, never someone else's claim.
+
+### How it decides
+
+```mermaid
+flowchart TD
+    A["Spawn-pick phase live:<br/>tile ownership, terrain, players, pending picks"] --> B{Heatmap has a cell<br/>with enough recorded<br/>games to trust?}
+    B -- yes --> C[Rank cells by win-rate<br/>vs. expected win rate]
+    C --> D{Best cell has a free<br/>tile - unowned, land,<br/>not someone's pick?}
+    D -- yes --> E[Pick the tile in that cell<br/>farthest from pending picks]
+    D -- no --> F[Try the next-best cell]
+    F --> D
+    B -- no / not enough data --> G{Any pending<br/>human picks yet?}
+    G -- no --> H[Pick the free tile farthest<br/>from nation/tribe territory]
+    G -- yes --> I[Search a modest radius around<br/>the picks' center point]
+    I --> J[Pick the free tile whose distance<br/>from the nearest pick is about<br/>HALF that radius - near the action,<br/>not crowding anyone, not fleeing to<br/>the far edge of the search area]
+    E --> K[Red dot marker]
+    H --> K
+    J --> K
+```
+
+The "half the radius, not the far edge" step exists on purpose — an earlier version maximized that distance instead, which just found the single most isolated spot available (an island, a dead-end corner) every time. See `STEP4.md` for the full story.
 
 ## Setup (Chrome / Edge)
 
@@ -43,3 +74,4 @@ If you get a newer version of the extension, replace the `extension` folder with
 - **Resize** by dragging the bottom-right corner.
 - **Collapse** with the `–`/`+` button in the header.
 - The heatmap updates whenever the selected/joined map changes.
+- The red best-spawn marker appears automatically once the spawn-pick countdown starts. (It doesn't yet hide itself once the game begins — a known, deliberately-deferred rough edge, not a bug.)
