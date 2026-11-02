@@ -354,9 +354,18 @@
   }
 
   // --- Step 4 marker (quick visual check, ahead of 4.8's real version) ---
-  // ponytail: no phase-stop yet (runs the whole page lifetime, not just
-  // during spawn pick) — fine for eyeballing the suggestion live; add the
-  // stop-on-game-start condition in 4.8 proper.
+  // Spawn-phase gate: nothing here has a clean "phase ended" signal, so
+  // ponytail: timer from the first pick message, reset on each new map.bin
+  // fetch; tune SPAWN_PHASE_MS if the real countdown is longer.
+  const SPAWN_PHASE_MS = 40000;
+  let spawnActive = true;
+  let spawnTimer = null;
+  function stopSpawnPhase() {
+    spawnActive = false;
+    lastBestTile = null;
+    if (markerCanvas) markerCanvas.remove();
+    markerCanvas = null;
+  }
   function getGameCanvas() {
     for (const c of document.querySelectorAll("canvas")) {
       if (!c.id.startsWith("oftools-")) return c;
@@ -388,6 +397,7 @@
   }
 
   function drawMarkerLoop() {
+    if (!spawnActive) return;
     requestAnimationFrame(drawMarkerLoop);
     const gameCanvas = getGameCanvas();
     if (!gameCanvas || !latestCamera || !lastBestTile) return;
@@ -421,6 +431,20 @@
   window.addEventListener("message", (ev) => {
     const d = ev.data;
     if (ev.source !== window || !d || d.source !== "oftools-inject") return;
+
+    if (d.type === "oftools-terrain") {
+      // new map load: re-arm
+      clearTimeout(spawnTimer);
+      spawnTimer = null;
+      if (!spawnActive) {
+        spawnActive = true;
+        requestAnimationFrame(drawMarkerLoop);
+      }
+    }
+    if (!spawnActive) return;
+    if (d.type === "oftools-spawns" && !spawnTimer) {
+      spawnTimer = setTimeout(stopSpawnPhase, SPAWN_PHASE_MS);
+    }
 
     if (d.type === "oftools-players") {
       for (const p of d.players) playersByID.set(p.smallID, p);
